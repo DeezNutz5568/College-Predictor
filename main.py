@@ -1,75 +1,73 @@
+from flask import Flask, request, jsonify, render_template, send_from_directory
 import pymysql
+from collections import defaultdict
+import os
 
-# DB config
+app = Flask(__name__)
+
+# --- DB Config ---
 DB_CONFIG = {
     'host': 'localhost',
     'user': 'root',
-    'password': '5568',  # replace this
+    'password': '5568',  # your db password
     'database': 'college_predictor',
-    'charset': 'utf8mb4',
     'cursorclass': pymysql.cursors.DictCursor
 }
 
-def get_user_inputs():
-    rank = int(input("🎯 Enter your rank: "))
-    category = input("🏷️  Enter your category (OPEN, OBC-NCL, EWS, SC, ST, etc.): ").upper().strip()
-    gender = input("🚻 Enter your gender (M/F): ").strip().upper()
-    home_state = input("🏠 Enter your home state: ").strip().title()
-    filter_option = input("🔘 Filter by state? (1: Home State only, 2: Other States only, 3: All): ").strip()
-    return rank, category, gender, home_state, filter_option
+@app.route('/')
+def home():
+    return render_template('index.html')
 
-def fetch_colleges(rank, category, gender, home_state, filter_option):
-    conn = pymysql.connect(**DB_CONFIG)
-    cursor = conn.cursor()
+@app.route('/images/<filename>')
+def serve_image(filename):
+    return send_from_directory('images', filename)
 
-    gender_clause = "'Gender-Neutral'"
-    if gender == "F":
-        gender_clause = "'Gender-Neutral', 'Female-only (including Supernumerary)'"
+@app.route('/predict', methods=['GET'])
+def predict():
+    rank = int(request.args.get('rank', 0))
+    category = request.args.get('category', '').upper()         # used as seat_stype
+    gender = request.args.get('gender', '').lower()
+    state = request.args.get('state', '').title()
+    inst_type = request.args.get('institute_type', '').upper()
 
-    state_filter = ""
-    if filter_option == "1":
-        state_filter = "AND state = %s"
-    elif filter_option == "2":
-        state_filter = "AND state != %s"
+    # Connect to DB
+    connection = pymysql.connect(**DB_CONFIG)
+    cursor = connection.cursor()
 
-    query = f"""
-    SELECT * FROM college_data
-    WHERE 
-        seat_stype = %s
-        AND gender_type IN ({gender_clause})
-        AND closing_rank >= %s
-        {state_filter}
-    ORDER BY closing_rank ASC
-    LIMIT 100;
+    # SQL Query
+    sql = """
+        SELECT * FROM college_data
+        WHERE closing_rank >= %s
+        AND seat_stype = %s
+        AND (gender_type = 'Gender-Neutral' OR gender_type = %s)
     """
+    params = [rank, category, 'Female' if gender == 'female' else 'Gender-Neutral']
 
-    try:
-        if filter_option in ["1", "2"]:
-            cursor.execute(query, (category, rank, home_state))
-        else:
-            cursor.execute(query, (category, rank))
-        results = cursor.fetchall()
-    except Exception as e:
-        print("❌ Query error:", e)
-        results = []
+    if inst_type:
+        sql += " AND institute_type = %s"
+        params.append(inst_type)
 
-    conn.close()
-    return results
+    cursor.execute(sql, params)
+    results = cursor.fetchall()
+    connection.close()
 
-def display_colleges(results):
-    if not results:
-        print("😢 No matching colleges found.")
-        return
+    # Group results
+    grouped = defaultdict(lambda: {
+        'institute': '',
+        'image_url': '',
+        'programs': []
+    })
 
-    print("\n🎓 Matching Colleges:\n")
     for row in results:
-        print(f"{row['institute_name']} | {row['academic_program']}")
-        print(f"→ Rank Range: {row['opening_rank']} - {row['closing_rank']}")
-        print(f"→ Gender: {row['gender_type']} | Institute Type: {row['institute_type']} | State: {row['state']}")
-        print("-" * 60)
+        name = row['institute_name']
+        grouped[name]['institute'] = name
+        grouped[name]['image_url'] = f"/images/{name.lower().replace('&', 'and').replace(' ', '_').replace(',', '').replace('.', '')}.jpg"
+        grouped[name]['programs'].append({
+            'program': row['academic_program'],
+            'closing_rank': row['closing_rank']
+        })
 
-# Main
-if __name__ == "__main__":
-    rank, category, gender, home_state, filter_option = get_user_inputs()
-    colleges = fetch_colleges(rank, category, gender, home_state, filter_option)
-    display_colleges(colleges)
+    return jsonify(list(grouped.values()))
+
+if __name__ == '__main__':
+    app.run(debug=True)
